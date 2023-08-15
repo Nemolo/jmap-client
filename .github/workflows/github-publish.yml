@@ -29,6 +29,10 @@ jobs:
           registry-url: https://registry.npmjs.org/
       - run: npm install
       - run: npm run build
+      - uses: actions/upload-artifact@v3
+        with:
+          name: release-package
+          path: /
       #- run: npm publish
       #  env:
       #    NODE_AUTH_TOKEN: ${{secrets.npm_token}}
