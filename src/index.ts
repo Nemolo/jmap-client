@@ -30,6 +30,7 @@ import {
   IEmailImportResponse,
   IThreadGetArguments,
   IThreadGetResponse,
+  IRequest,
 } from './types';
 
 export class Client {
@@ -41,16 +42,17 @@ export class Client {
   private sessionUrl: string;
   private overriddenApiUrl?: string;
   private session?: ISession;
+  protected accessTokenProvider: string | Promise<string> | (() => string) | (() => Promise<String>);
 
   constructor({
     sessionUrl,
-    accessToken,
+    accessTokenProvider,
     overriddenApiUrl,
     transport,
     httpHeaders,
   }: {
     sessionUrl: string;
-    accessToken: string;
+    accessTokenProvider: string | Promise<string> | (() => string) | (() => Promise<String>);
     overriddenApiUrl?: string;
     transport: Transport;
     httpHeaders?: { [headerName: string]: string };
@@ -60,17 +62,43 @@ export class Client {
       this.overriddenApiUrl = overriddenApiUrl;
     }
     this.transport = transport;
+    this.accessTokenProvider = accessTokenProvider;
     this.httpHeaders = {
       Accept: 'application/json;jmapVersion=rfc-8621',
-      Authorization: `Bearer ${accessToken}`,
+      // Authorization: `Bearer ${accessToken}`,
       ...(httpHeaders ? httpHeaders : {}),
     };
   }
 
-  public fetchSession(sessionHeaders?: { [headerName: string]: string }): Promise<void> {
+  protected async getAccessToken() {
+    switch (typeof this.accessTokenProvider) {
+      case 'string':
+        return this.accessTokenProvider;
+      case 'object':
+        if (this.accessTokenProvider instanceof Promise) {
+          const accessToken = await this.accessTokenProvider;
+          if (typeof accessToken === 'string') {
+            return accessToken;
+          }
+        }
+        break;
+      case 'function':
+        const accessToken = await this.accessTokenProvider();
+        if (typeof accessToken === 'string') {
+          return accessToken;
+        }
+      default:
+        throw new Error('Access Token Provider not resolving to a string')
+    }
+  }
+
+  public async fetchSession(sessionHeaders?: { [headerName: string]: string }): Promise<void> {
+    const accessToken = await this.getAccessToken();
     const requestHeaders = {
       ...this.httpHeaders,
+      Authorization: `Bearer ${accessToken}`,
       ...(sessionHeaders ? sessionHeaders : {}),
+
     };
     const sessionPromise = this.transport.get<ISession>(this.sessionUrl, requestHeaders);
     return sessionPromise.then(session => {
@@ -170,20 +198,8 @@ export class Client {
     );
   }
 
-  private request<ResponseType>(methodName: IMethodName, args: IArguments) {
-    const apiUrl = this.overriddenApiUrl || this.getSession().apiUrl;
-    return this.transport
-      .post<{
-        sessionState: string;
-        methodResponses: IInvocation<ResponseType>[];
-      }>(
-        apiUrl,
-        {
-          using: this.getCapabilities(),
-          methodCalls: [[methodName, this.replaceAccountId(args), '0']],
-        },
-        this.httpHeaders,
-      )
+  private async request<ResponseType>(methodName: IMethodName, args: IArguments) {
+    return this.rawRequest<ResponseType>([[methodName, this.replaceAccountId(args), '0']])
       .then(response => {
         const methodResponse = response.methodResponses[0];
 
@@ -192,16 +208,36 @@ export class Client {
         }
 
         return methodResponse[1];
-      });
+      });;
+  }
+
+  public async rawRequest<R>(methodCalls: IRequest['methodCalls']) {
+    const apiUrl = this.overriddenApiUrl || this.getSession().apiUrl;
+    const accessToken = await this.getAccessToken();
+    return await this.transport
+      .post<{
+        sessionState: string;
+        methodResponses: IInvocation<R>[];
+      }>(
+        apiUrl,
+        {
+          using: this.getCapabilities(),
+          methodCalls,
+        },
+        {
+          ...this.httpHeaders,
+          Authorization: `Bearer ${accessToken}`,
+        },
+      );
   }
 
   private replaceAccountId<U extends IReplaceableAccountId>(input: U): U {
     return input.accountId !== null
       ? input
       : {
-          ...input,
-          accountId: this.getFirstAccountId(),
-        };
+        ...input,
+        accountId: this.getFirstAccountId(),
+      };
   }
 
   private getCapabilities() {
